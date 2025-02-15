@@ -84,6 +84,7 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
  public:
   class GsmClientBC660 : public GsmClient {
     friend class TinyGsmBC660;
+    size_t data_size;
 
    public:
     GsmClientBC660() {}
@@ -99,6 +100,7 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
       prev_check     = 0;
       sock_connected = false;
       got_data       = false;
+      data_size      = 0;
 
       if (mux < TINY_GSM_MUX_COUNT) {
         this->mux = mux;
@@ -207,6 +209,9 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
     sendAT(GF("+CTZU=1"));
     if (waitResponse(10000L) != 1) { return false; }
 
+    // Enable length on URCs
+    sendAT(GF("+QICFG=\"showlength\",1"));
+    if (waitResponse(10000L) != 1) { return false; }
     SimStatus ret = getSimStatus();
     // if the sim isn't ready and a pin has been provided, try to unlock the sim
     if (ret != SIM_READY && pin != nullptr && strlen(pin) > 0) {
@@ -716,7 +721,7 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
       // "TCP/UDP/TCP LISTENER/UDPSERVICE", "<IP_address>/<domain_name>",
       // <remote_port>,<local_port>,<access_mode>(0-2; 0=buffer)
       sendAT(GF("+QIOPEN=0,"), mux, GF(",\""), GF("TCP"), GF("\",\""), host,
-             GF("\","), port, GF(",0,1"));
+             GF("\","), port, GF(",0,0"));
       waitResponse();
 
       if (waitResponse(timeout_ms, GF(AT_NL "+QIOPEN:")) != 1) { return false; }
@@ -755,11 +760,13 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
       sendAT(GF("+QIRD="), mux, ',', (uint16_t)size);
       if (waitResponse(GF("+QIRD:")) != 1) { return 0; }
     }
-    int16_t len = streamGetIntBefore('\n');
+    int16_t len = streamGetIntBefore(',');
+    streamSkipUntil('"');
 
     for (int i = 0; i < len; i++) { moveCharFromStreamToFifo(mux); }
-    waitResponse();
-    // DBG("### READ:", len, "from", mux);
+    stream.flush();
+    sockets[mux]->data_size = sockets[mux]->data_size - len;
+    DBG("### READ:", len, "from", mux, size);
     sockets[mux]->sock_available = modemGetAvailable(mux);
     return len;
   }
@@ -778,13 +785,9 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
         waitResponse();
       }
     } else {
-      sendAT(GF("+QIRD="), mux, GF(",0"));
-      if (waitResponse(GF("+QIRD:")) == 1) {
-        streamSkipUntil(',');  // Skip total received
-        streamSkipUntil(',');  // Skip have read
-        result = streamGetIntBefore('\n');
+      if (sockets[mux]->data_size > 0) {
+        result = sockets[mux]->data_size;
         if (result) { DBG("### DATA AVAILABLE:", result, "on", mux); }
-        waitResponse();
       }
     }
     if (!result) { sockets[mux]->sock_connected = modemGetConnected(mux); }
@@ -840,10 +843,12 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
       String urc = stream.readStringUntil('\"');
       streamSkipUntil(',');
       if (urc == "recv") {
-        int8_t mux = streamGetIntBefore('\n');
-        DBG("### URC RECV:", mux);
+        int8_t mux = streamGetIntBefore(',');
+        size_t len = streamGetIntBefore('\n');
+        DBG("### URC RECV:", mux, len);
         if (mux >= 0 && mux < TINY_GSM_MUX_COUNT && sockets[mux]) {
-          sockets[mux]->got_data = true;
+          sockets[mux]->got_data  = true;
+          sockets[mux]->data_size = len;
         }
       } else if (urc == "closed") {
         int8_t mux = streamGetIntBefore('\n');
