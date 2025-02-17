@@ -125,8 +125,8 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
       uint32_t startMillis = millis();
       dumpModemBuffer(maxWaitMs);
       at->sendAT(GF("+QICLOSE="), mux);
+      at->waitResponse((maxWaitMs - (millis() - startMillis)), GF("CLOSE OK"));
       sock_connected = false;
-      at->waitResponse((maxWaitMs - (millis() - startMillis)));
     }
     void stop() override {
       stop(15000L);
@@ -739,10 +739,18 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
     } else {
       sendAT(GF("+QISEND="), mux, ',', (uint16_t)len);
     }
-    if (waitResponse(GF(">")) != 1) { return 0; }
+    if (waitResponse(GF(">")) != 1) {
+      sockets[mux]->data_size      = 0;
+      sockets[mux]->sock_connected = false;
+      return 0;
+    }
     stream.write(reinterpret_cast<const uint8_t*>(buff), len);
     stream.flush();
-    if (waitResponse(GF(AT_NL "SEND OK")) != 1) { return 0; }
+    if (waitResponse(GF(AT_NL "SEND OK")) != 1) {
+      sockets[mux]->data_size      = 0;
+      sockets[mux]->sock_connected = false;
+      return 0;
+    }
     // TODO(?): Wait for ACK? (AT+QISEND=id,0 or AT+QSSLSEND=id,0)
     return len;
   }
@@ -757,14 +765,19 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
         return 0;
       }
     } else {
+      if (size > 1340) size = 1340;
       sendAT(GF("+QIRD="), mux, ',', (uint16_t)size);
-      if (waitResponse(GF("+QIRD:")) != 1) { return 0; }
+      if (waitResponse(GF("+QIRD:")) != 1) {
+        sockets[mux]->data_size      = 0;
+        sockets[mux]->sock_connected = false;
+        return 0;
+      }
     }
     int16_t len = streamGetIntBefore(',');
     streamSkipUntil('"');
 
     for (int i = 0; i < len; i++) { moveCharFromStreamToFifo(mux); }
-    stream.flush();
+    waitResponse();
     sockets[mux]->data_size = sockets[mux]->data_size - len;
     DBG("### READ:", len, "from", mux, size);
     sockets[mux]->sock_available = modemGetAvailable(mux);
@@ -785,6 +798,7 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
         waitResponse();
       }
     } else {
+      if (!sockets[mux]->sock_connected) sockets[mux]->data_size = 0;
       if (sockets[mux]->data_size > 0) {
         result = sockets[mux]->data_size;
         if (result) { DBG("### DATA AVAILABLE:", result, "on", mux); }
@@ -795,6 +809,7 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
   }
 
   bool modemGetConnected(uint8_t mux) {
+    return sockets[mux]->sock_connected;
     bool ssl = sockets[mux]->ssl_sock;
     if (ssl) {
       sendAT(GF("+QSSLSTATE=1,"), mux);
@@ -817,7 +832,9 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
       sendAT(GF("+QISTATE=1,"), mux);
       // +QISTATE: 0,"TCP","220.180.239.212",8062,0,2,0,1
 
-      if (waitResponse(GF("OK"), GF("+QISTATE:")) != 2) { return false; }
+      if (waitResponse(GF("OK"), GF("+QISTATE:"), GF("ERROR")) != 2) {
+        return false;
+      }
 
       streamSkipUntil(',');                  // Skip mux
       streamSkipUntil(',');                  // Skip socket type
@@ -847,8 +864,9 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
         size_t len = streamGetIntBefore('\n');
         DBG("### URC RECV:", mux, len);
         if (mux >= 0 && mux < TINY_GSM_MUX_COUNT && sockets[mux]) {
-          sockets[mux]->got_data  = true;
-          sockets[mux]->data_size = len;
+          sockets[mux]->sock_connected = true;
+          sockets[mux]->got_data       = true;
+          sockets[mux]->data_size      = len;
         }
       } else if (urc == "closed") {
         int8_t mux = streamGetIntBefore('\n');
