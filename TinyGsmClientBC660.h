@@ -739,10 +739,18 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
     } else {
       sendAT(GF("+QISEND="), mux, ',', (uint16_t)len);
     }
-    if (waitResponse(GF(">")) != 1) { return 0; }
+    if (waitResponse(GF(">")) != 1) {
+      // sockets[mux]->data_size      = 0;
+      // sockets[mux]->sock_connected = false;
+      return 0;
+    }
     stream.write(reinterpret_cast<const uint8_t*>(buff), len);
     stream.flush();
-    if (waitResponse(GF(AT_NL "SEND OK")) != 1) { return 0; }
+    if (waitResponse(GF(AT_NL "SEND OK")) != 1) {
+      // sockets[mux]->data_size      = 0;
+      // sockets[mux]->sock_connected = false;
+      return 0;
+    }
     // TODO(?): Wait for ACK? (AT+QISEND=id,0 or AT+QSSLSEND=id,0)
     return len;
   }
@@ -758,7 +766,11 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
       }
     } else {
       sendAT(GF("+QIRD="), mux, ',', (uint16_t)size);
-      if (waitResponse(GF("+QIRD:")) != 1) { return 0; }
+      if (waitResponse(GF("+QIRD:")) != 1) {
+        // sockets[mux]->data_size      = 0;
+        // sockets[mux]->sock_connected = false;
+        return 0;
+      }
     }
     size_t len = streamGetIntBefore(',');
     streamSkipUntil('"');
@@ -788,10 +800,7 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
       if (!sockets[mux]->sock_connected) sockets[mux]->data_size = 0;
       if (sockets[mux]->data_size > 0) {
         result = sockets[mux]->data_size;
-        if (result) {
-          DBG("### DATA AVAILABLE:", result, "on", mux,
-              sockets[mux]->sock_connected);
-        }
+        if (result) { DBG("### DATA AVAILABLE:", result, "on", mux, sockets[mux]->sock_connected); }
       }
     }
     if (!result) { sockets[mux]->sock_connected = modemGetConnected(mux); }
@@ -833,6 +842,7 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
       int8_t res = streamGetIntBefore(',');  // socket state
 
       waitResponse();
+      DBG("### CLIENT STATUS", res);
 
       // 0 Initial, 1 Opening, 2 Connected, 3 Listening, 4 Closing
       return 2 == res;
@@ -866,6 +876,7 @@ class TinyGsmBC660 : public TinyGsmModem<TinyGsmBC660>,
           sockets[mux]->sock_connected = false;
         }
       } else {
+        Serial.println(data);
         streamSkipUntil('\n');
       }
       data = "";
